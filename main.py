@@ -279,6 +279,13 @@ async def submit_renewal(payload: RenewalPayload):
         cursor.execute("INSERT INTO Cloud_License_Queue VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ADMIN', '', ?) ON CONFLICT(Installation_ID) DO UPDATE SET Amount_Paid=excluded.Amount_Paid, Requested_Days=excluded.Requested_Days, Status='PENDING_ADMIN', Generated_Key='', Timestamp=excluded.Timestamp", 
             (payload.installationId, payload.schoolName, payload.branchId, payload.amountPaid, payload.requestedDays, payload.paymentMethod, payload.referenceNo, payload.notes, ts))
         conn.commit()
+        
+        # 🟢 PRO FIX: The Cloud texts you instantly!
+        vendor_msg = f"[PIXELEDU ALERT] {payload.schoolName} ({payload.branchId}) requested a {payload.requestedDays}-day renewal. Amount: GHS {payload.amountPaid} via {payload.paymentMethod}. Log into Admin Authority to process."
+        sms_payload = { "sender": ARKESEL_SENDER_ID, "message": vendor_msg, "recipients": ["0554794797"] }
+        async with httpx.AsyncClient() as http_client:
+            await http_client.post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=5.0)
+
         return {"success": True}
     except Exception as e:
         conn.rollback()
