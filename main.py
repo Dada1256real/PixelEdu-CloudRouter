@@ -323,6 +323,21 @@ async def admin_pull_renewals():
     conn.close()
     return {"success": True, "data": rows}
 
+# 5. Admin Deletes Cloud Request
+@app.delete("/api/v1/admin/delete-request/{install_id}")
+async def admin_delete_request(install_id: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM Cloud_License_Queue WHERE Installation_ID = ?", (install_id,))
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+        
 # 4. Admin Keygen Pushes Approved Key to Cloud
 @app.post("/api/v1/admin/approve-key")
 async def admin_approve_key(payload: AdminApproveKeyPayload):
