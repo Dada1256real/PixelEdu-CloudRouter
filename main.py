@@ -35,6 +35,7 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS Cloud_Parent_Requests (Request_ID TEXT PRIMARY KEY, School_ID TEXT, Student_ID TEXT, Category TEXT, Payload_JSON TEXT, Status TEXT, Timestamp TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS Cloud_Student_Snapshots (School_ID TEXT PRIMARY KEY, Encrypted_JSON_Payload TEXT, Last_Synced TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS Cloud_OTP_Verification (Phone TEXT PRIMARY KEY, OTP_Code TEXT, Expires_At TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Cloud_License_Queue (Installation_ID TEXT PRIMARY KEY, School_Name TEXT, Branch_ID TEXT, Amount_Paid REAL, Requested_Days INTEGER, Payment_Method TEXT, Reference_No TEXT, Notes TEXT, Status TEXT, Generated_Key TEXT, Timestamp TEXT)''')
     conn.commit()
     conn.close()
 
@@ -69,6 +70,20 @@ class OTPVerifyPayload(BaseModel):
     schoolId: str
     phoneIdentifier: str
     otp: str
+
+class RenewalPayload(BaseModel):
+    installationId: str
+    schoolName: str
+    branchId: str
+    amountPaid: float
+    requestedDays: int
+    paymentMethod: str
+    referenceNo: str
+    notes: str
+
+class AdminApproveKeyPayload(BaseModel):
+    installationId: str
+    generatedKey: str
 
 @app.post("/api/v1/public/admissions/submit")
 async def submit_admission(payload: AdmissionPayload):
@@ -242,6 +257,79 @@ async def push_student_snapshot(payload: SyncSnapshotPayload):
     ts = datetime.datetime.utcnow().isoformat()
     try:
         cursor.execute("INSERT INTO Cloud_Student_Snapshots VALUES (?, ?, ?) ON CONFLICT(School_ID) DO UPDATE SET Encrypted_JSON_Payload=excluded.Encrypted_JSON_Payload, Last_Synced=excluded.Last_Synced", (payload.schoolId, payload.encryptedPayload, ts))
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+# =========================================================
+# 🟢 ENTERPRISE LICENSE EXCHANGE ENGINE
+# =========================================================
+
+# 1. School Submits Renewal to Cloud
+@app.post("/api/sync/submit-renewal")
+async def submit_renewal(payload: RenewalPayload):
+    conn = get_db()
+    cursor = conn.cursor()
+    ts = datetime.datetime.utcnow().isoformat()
+    try:
+        cursor.execute("INSERT INTO Cloud_License_Queue VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ADMIN', '', ?) ON CONFLICT(Installation_ID) DO UPDATE SET Amount_Paid=excluded.Amount_Paid, Requested_Days=excluded.Requested_Days, Status='PENDING_ADMIN', Generated_Key='', Timestamp=excluded.Timestamp", 
+            (payload.installationId, payload.schoolName, payload.branchId, payload.amountPaid, payload.requestedDays, payload.paymentMethod, payload.referenceNo, payload.notes, ts))
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+# 2. School Checks Cloud for Approved Key
+@app.get("/api/sync/check-key/{install_id}")
+async def check_approved_key(install_id: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM Cloud_License_Queue WHERE Installation_ID = ? AND Status = 'APPROVED'", (install_id,))
+    row = cursor.fetchone()
+    
+    if row:
+        # Mark as consumed so it doesn't get pulled twice
+        cursor.execute("UPDATE Cloud_License_Queue SET Status = 'CONSUMED' WHERE Installation_ID = ?", (install_id,))
+        conn.commit()
+        conn.close()
+        return {
+            "success": True, 
+            "keyWaiting": True, 
+            "data": {
+                "generated_key": row["Generated_Key"],
+                "student_count": 1, 
+                "additional_days": row["Requested_Days"],
+                "amount_paid": row["Amount_Paid"]
+            }
+        }
+    
+    conn.close()
+    return {"success": True, "keyWaiting": False}
+
+# 3. Admin Keygen Pulls Pending Requests
+@app.get("/api/v1/admin/pending-renewals")
+async def admin_pull_renewals():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM Cloud_License_Queue WHERE Status = 'PENDING_ADMIN'")
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return {"success": True, "data": rows}
+
+# 4. Admin Keygen Pushes Approved Key to Cloud
+@app.post("/api/v1/admin/approve-key")
+async def admin_approve_key(payload: AdminApproveKeyPayload):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE Cloud_License_Queue SET Status = 'APPROVED', Generated_Key = ? WHERE Installation_ID = ?", (payload.generatedKey, payload.installationId))
         conn.commit()
         return {"success": True}
     except Exception as e:
