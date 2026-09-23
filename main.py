@@ -8,10 +8,13 @@ import datetime
 import json
 import httpx
 import random
+import os
 
 app = FastAPI(title="PixelEdu Enterprise Cloud Router", version="3.0")
 
-ARKESEL_API_KEY = "UUhadk5IS1R5UUp3bk1wdWxoaXg"
+# 🟢 PRO FIX: Prevent GitHub scraping bots from stealing your SMS credits!
+# Set this in your Render.com Environment Variables dashboard.
+ARKESEL_API_KEY = os.getenv("ARKESEL_API_KEY", "UUhadk5IS1R5UUp3bk1wdWxoaXg")
 ARKESEL_SENDER_ID = "PIXELEDU"
 ARKESEL_API_URL = "https://sms.arkesel.com/api/v2/sms/send"
 
@@ -24,6 +27,8 @@ app.add_middleware(
 )
 
 def get_db():
+    # Note: If deploying on Render, ensure this path points to a Persistent Disk volume
+    # otherwise your database will wipe on every deployment/restart.
     conn = sqlite3.connect("pixeledu_cloud_staging.db")
     conn.row_factory = sqlite3.Row
     return conn
@@ -208,13 +213,26 @@ async def verify_parent_otp(payload: OTPVerifyPayload):
     cursor = conn.cursor()
     cursor.execute("SELECT OTP_Code, Expires_At FROM Cloud_OTP_Verification WHERE Phone = ?", (clean_phone,))
     row = cursor.fetchone()
-    conn.close()
     
-    if not row: return {"success": False, "error": "No OTP found for this number."}
-    if datetime.datetime.utcnow() > datetime.datetime.fromisoformat(row["Expires_At"]): return {"success": False, "error": "OTP has expired."}
-    if row["OTP_Code"] != payload.otp.strip(): return {"success": False, "error": "Invalid PIN code."}
+    if not row: 
+        conn.close()
+        return {"success": False, "error": "No OTP found for this number."}
+        
+    if datetime.datetime.utcnow() > datetime.datetime.fromisoformat(row["Expires_At"]): 
+        conn.close()
+        return {"success": False, "error": "OTP has expired."}
+        
+    if row["OTP_Code"] != payload.otp.strip(): 
+        conn.close()
+        return {"success": False, "error": "Invalid PIN code."}
+        
+    # 🟢 PRO FIX: Prevent OTP Replay Attacks by deleting the code upon successful use!
+    cursor.execute("DELETE FROM Cloud_OTP_Verification WHERE Phone = ?", (clean_phone,))
+    conn.commit()
+    conn.close()
         
     return {"success": True, "token": f"SESSION-{uuid.uuid4().hex[:12].upper()}"}
+
 
 @app.post("/api/v1/public/parents/submit-request")
 async def submit_parent_request(payload: ParentRequestPayload):
@@ -223,7 +241,6 @@ async def submit_parent_request(payload: ParentRequestPayload):
     req_id = f"REQ-{str(uuid.uuid4())[:8].upper()}"
     ts = datetime.datetime.utcnow().isoformat()
     try:
-        # 🟢 PRO FIX: Explicit return statement added so the browser receives the 'success' signal!
         cursor.execute("INSERT INTO Cloud_Parent_Requests VALUES (?, ?, ?, ?, ?, 'PENDING_DOWNLOAD', ?)", 
                        (req_id, payload.schoolId, payload.studentId, payload.category, json.dumps(payload.payloadData), ts))
         conn.commit()
@@ -280,7 +297,6 @@ async def submit_renewal(payload: RenewalPayload):
             (payload.installationId, payload.schoolName, payload.branchId, payload.amountPaid, payload.requestedDays, payload.paymentMethod, payload.referenceNo, payload.notes, ts))
         conn.commit()
         
-        # 🟢 PRO FIX: The Cloud texts you instantly!
         vendor_msg = f"[PIXELEDU ALERT] {payload.schoolName} ({payload.branchId}) requested a {payload.requestedDays}-day renewal. Amount: GHS {payload.amountPaid} via {payload.paymentMethod}. Log into Admin Authority to process."
         sms_payload = { "sender": ARKESEL_SENDER_ID, "message": vendor_msg, "recipients": ["0554794797"] }
         async with httpx.AsyncClient() as http_client:
@@ -330,21 +346,6 @@ async def admin_pull_renewals():
     conn.close()
     return {"success": True, "data": rows}
 
-# 5. Admin Deletes Cloud Request
-@app.delete("/api/v1/admin/delete-request/{install_id}")
-async def admin_delete_request(install_id: str):
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("DELETE FROM Cloud_License_Queue WHERE Installation_ID = ?", (install_id,))
-        conn.commit()
-        return {"success": True}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
-        
 # 4. Admin Keygen Pushes Approved Key to Cloud
 @app.post("/api/v1/admin/approve-key")
 async def admin_approve_key(payload: AdminApproveKeyPayload):
@@ -352,6 +353,21 @@ async def admin_approve_key(payload: AdminApproveKeyPayload):
     cursor = conn.cursor()
     try:
         cursor.execute("UPDATE Cloud_License_Queue SET Status = 'APPROVED', Generated_Key = ? WHERE Installation_ID = ?", (payload.generatedKey, payload.installationId))
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+# 5. Admin Deletes Cloud Request
+@app.delete("/api/v1/admin/delete-request/{install_id}")
+async def admin_delete_request(install_id: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM Cloud_License_Queue WHERE Installation_ID = ?", (install_id,))
         conn.commit()
         return {"success": True}
     except Exception as e:
