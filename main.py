@@ -46,6 +46,9 @@ def init_db():
 
 init_db()
 
+# =========================================================
+# 🟢 PYDANTIC DATA MODELS
+# =========================================================
 class AdmissionPayload(BaseModel):
     schoolId: str
     branchId: str
@@ -90,6 +93,22 @@ class AdminApproveKeyPayload(BaseModel):
     installationId: str
     generatedKey: str
 
+# 🟢 NEW: Teacher Portal Data Models
+class TeacherAuthPayload(BaseModel):
+    schoolId: str
+    staffId: str
+    pin: str
+
+class TeacherSubmitPayload(BaseModel):
+    schoolId: str
+    staffId: str
+    actionType: str 
+    payloadData: dict
+
+
+# =========================================================
+# 🟢 PUBLIC ADMISSIONS
+# =========================================================
 @app.post("/api/v1/public/admissions/submit")
 async def submit_admission(payload: AdmissionPayload):
     conn = get_db()
@@ -107,6 +126,10 @@ async def submit_admission(payload: AdmissionPayload):
     finally:
         conn.close()
 
+
+# =========================================================
+# 🟢 PUBLIC PARENT PORTAL & OTP ENGINE
+# =========================================================
 @app.get("/api/v1/public/school-snapshot/{school_id}")
 async def get_school_snapshot(school_id: str):
     conn = get_db()
@@ -117,17 +140,12 @@ async def get_school_snapshot(school_id: str):
     if row: return {"success": True, "data": row["Encrypted_JSON_Payload"]}
     return {"success": False, "error": "School data offline."}
 
-# =========================================================
-# 🟢 PRO FIX: BULLETPROOF OTP PRE-VALIDATOR ENGINE
-# =========================================================
 @app.post("/api/v1/public/parents/request-otp")
 async def request_parent_otp(payload: OTPRequestPayload):
-    # 1. Clean the input phone number
     digits_only = "".join(filter(str.isdigit, payload.phone))
     clean_phone = "233" + digits_only[1:] if digits_only.startswith("0") and len(digits_only) == 10 else digits_only
     search_name = payload.studentName.strip().lower()
 
-    # 2. Fetch Cloud Snapshot
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT Encrypted_JSON_Payload FROM Cloud_Student_Snapshots WHERE School_ID = ?", (payload.schoolId,))
@@ -141,24 +159,18 @@ async def request_parent_otp(payload: OTPRequestPayload):
         snapshot = json.loads(row["Encrypted_JSON_Payload"])
         students = snapshot.get("Students", [])
         guardians = snapshot.get("Guardians", [])
-        
         valid_user = False
         
-        # 3. Check Students Table (Fuzzy Matching)
         for stu in students:
-            # Strip EVERYTHING except digits from the database phone string
             raw_stu_phone = str(stu.get("Phone", "") or "")
             stu_phone = "".join(filter(str.isdigit, raw_stu_phone))
             if stu_phone.startswith("0") and len(stu_phone) == 10: stu_phone = "233" + stu_phone[1:]
-            
-            # Split the full name into parts to check if the parent typed just the first or last name
             stu_name_parts = str(stu.get("Full_Name", "") or "").lower().split()
             
             if stu_phone == clean_phone and search_name in stu_name_parts:
                 valid_user = True
                 break
                 
-        # 4. Check Guardians Table if not found in Students
         if not valid_user:
             for grd in guardians:
                 raw_grd_phone = str(grd.get("Phone_1", "") or "")
@@ -183,7 +195,6 @@ async def request_parent_otp(payload: OTPRequestPayload):
         if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail="Cloud verification engine error.")
 
-    # 5. Passed Validation! Generate & Send OTP
     otp_code = str(random.randint(1000, 9999))
     expires_at = (datetime.datetime.utcnow() + datetime.timedelta(minutes=10)).isoformat()
     
@@ -202,7 +213,6 @@ async def request_parent_otp(payload: OTPRequestPayload):
             else: raise HTTPException(status_code=500, detail=f"Arkesel Error: {response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/v1/public/parents/verify-otp")
 async def verify_parent_otp(payload: OTPVerifyPayload):
@@ -226,13 +236,11 @@ async def verify_parent_otp(payload: OTPVerifyPayload):
         conn.close()
         return {"success": False, "error": "Invalid PIN code."}
         
-    # 🟢 PRO FIX: Prevent OTP Replay Attacks by deleting the code upon successful use!
     cursor.execute("DELETE FROM Cloud_OTP_Verification WHERE Phone = ?", (clean_phone,))
     conn.commit()
     conn.close()
         
     return {"success": True, "token": f"SESSION-{uuid.uuid4().hex[:12].upper()}"}
-
 
 @app.post("/api/v1/public/parents/submit-request")
 async def submit_parent_request(payload: ParentRequestPayload):
@@ -251,6 +259,89 @@ async def submit_parent_request(payload: ParentRequestPayload):
     finally:
         conn.close()
 
+
+# =========================================================
+# 🟢 NEW: TEACHER PORTAL & WORKSPACE API
+# =========================================================
+
+@app.post("/api/v1/teacher/auth")
+async def teacher_auth(payload: TeacherAuthPayload):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT Encrypted_JSON_Payload FROM Cloud_Student_Snapshots WHERE School_ID = ?", (payload.schoolId,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return {"success": False, "error": "School cloud database is currently offline or syncing."}
+
+    try:
+        snapshot = json.loads(row["Encrypted_JSON_Payload"])
+        staff_list = snapshot.get("Staff", [])
+        
+        for staff in staff_list:
+            s_id = str(staff.get("Staff_ID", "") or "")
+            s_pin = str(staff.get("Academic_PIN", "") or "")
+
+            if s_id.strip().upper() == payload.staffId.strip().upper() and s_pin == payload.pin:
+                return {
+                    "success": True,
+                    "token": f"TCH-{uuid.uuid4().hex[:12].upper()}",
+                    "user": {
+                        "id": s_id,
+                        "fullName": staff.get("Full_Name", "Teacher"),
+                        "assignedClasses": json.loads(staff.get("Assigned_Classes", "[]") or "[]"),
+                        "assignedSubjects": json.loads(staff.get("Assigned_Subjects", "[]") or "[]")
+                    }
+                }
+                
+        return {"success": False, "error": "Authentication Failed. Invalid Staff ID or Academic PIN."}
+    except Exception as e:
+        return {"success": False, "error": f"Cloud verification error: {str(e)}"}
+
+@app.get("/api/v1/teacher/data/{school_id}")
+async def get_teacher_data(school_id: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT Encrypted_JSON_Payload FROM Cloud_Student_Snapshots WHERE School_ID = ?", (school_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row: return {"success": False, "error": "No data found."}
+
+    snapshot = json.loads(row["Encrypted_JSON_Payload"])
+    # We only return what the teacher needs to keep the mobile payload extremely fast
+    return {
+        "success": True,
+        "data": {
+            "students": snapshot.get("Students", []),
+            "classes": snapshot.get("Classes", []),
+            "subjects": snapshot.get("Subjects", [])
+        }
+    }
+
+@app.post("/api/v1/teacher/submit")
+async def teacher_submit(payload: TeacherSubmitPayload):
+    conn = get_db()
+    cursor = conn.cursor()
+    # We inject this into Cloud_Parent_Requests so the Desktop CloudSyncDaemon automatically downloads it into the Pending Approvals Queue!
+    req_id = f"TCH-{str(uuid.uuid4())[:8].upper()}"
+    ts = datetime.datetime.utcnow().isoformat()
+    try:
+        cursor.execute("INSERT INTO Cloud_Parent_Requests VALUES (?, ?, ?, ?, ?, 'PENDING_DOWNLOAD', ?)", 
+                       (req_id, payload.schoolId, payload.staffId, f"Teacher_{payload.actionType}", json.dumps(payload.payloadData), ts))
+        conn.commit()
+        return {"success": True, "requestId": req_id}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+# =========================================================
+# 🟢 CLOUD SYNCHRONIZATION DAEMON (DESKTOP BRIDGE)
+# =========================================================
 @app.get("/api/v1/sync/pull-pending/{school_id}")
 async def pull_pending_cloud_data(school_id: str):
     conn = get_db()
@@ -282,11 +373,11 @@ async def push_student_snapshot(payload: SyncSnapshotPayload):
     finally:
         conn.close()
 
+
 # =========================================================
 # 🟢 ENTERPRISE LICENSE EXCHANGE ENGINE
 # =========================================================
 
-# 1. School Submits Renewal to Cloud
 @app.post("/api/sync/submit-renewal")
 async def submit_renewal(payload: RenewalPayload):
     conn = get_db()
@@ -309,7 +400,6 @@ async def submit_renewal(payload: RenewalPayload):
     finally:
         conn.close()
 
-# 2. School Checks Cloud for Approved Key
 @app.get("/api/sync/check-key/{install_id}")
 async def check_approved_key(install_id: str):
     conn = get_db()
@@ -318,25 +408,17 @@ async def check_approved_key(install_id: str):
     row = cursor.fetchone()
     
     if row:
-        # Mark as consumed so it doesn't get pulled twice
         cursor.execute("UPDATE Cloud_License_Queue SET Status = 'CONSUMED' WHERE Installation_ID = ?", (install_id,))
         conn.commit()
         conn.close()
         return {
-            "success": True, 
-            "keyWaiting": True, 
-            "data": {
-                "generated_key": row["Generated_Key"],
-                "student_count": 1, 
-                "additional_days": row["Requested_Days"],
-                "amount_paid": row["Amount_Paid"]
-            }
+            "success": True, "keyWaiting": True, 
+            "data": { "generated_key": row["Generated_Key"], "student_count": 1, "additional_days": row["Requested_Days"], "amount_paid": row["Amount_Paid"] }
         }
     
     conn.close()
     return {"success": True, "keyWaiting": False}
 
-# 3. Admin Keygen Pulls Pending Requests
 @app.get("/api/v1/admin/pending-renewals")
 async def admin_pull_renewals():
     conn = get_db()
@@ -346,7 +428,6 @@ async def admin_pull_renewals():
     conn.close()
     return {"success": True, "data": rows}
 
-# 4. Admin Keygen Pushes Approved Key to Cloud
 @app.post("/api/v1/admin/approve-key")
 async def admin_approve_key(payload: AdminApproveKeyPayload):
     conn = get_db()
@@ -361,7 +442,6 @@ async def admin_approve_key(payload: AdminApproveKeyPayload):
     finally:
         conn.close()
 
-# 5. Admin Deletes Cloud Request
 @app.delete("/api/v1/admin/delete-request/{install_id}")
 async def admin_delete_request(install_id: str):
     conn = get_db()
