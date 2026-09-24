@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -12,16 +12,13 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import asyncio
 
-app = FastAPI(title="PixelEdu Enterprise Cloud Router", version="3.0")
+app = FastAPI(title="PixelEdu Enterprise Cloud Router", version="3.1")
 
-# 🟢 PRO FIX: Prevent GitHub scraping bots from stealing your SMS credits!
 ARKESEL_API_KEY = os.getenv("ARKESEL_API_KEY", "UUhadk5IS1R5UUp3bk1wdWxoaXg")
 ARKESEL_SENDER_ID = "PIXELEDU"
 ARKESEL_API_URL = "https://sms.arkesel.com/api/v2/sms/send"
 
-# 🟢 PRO FIX: Cloud SMTP Engine Credentials
 SMTP_USER = "pixelenxitconsult@gmail.com"
 SMTP_PASS = "gnupjqqhbwkpoeas"
 
@@ -52,9 +49,9 @@ def init_db():
 init_db()
 
 # =========================================================
-# 🟢 CLOUD EMAIL HELPER
+# 🟢 THREAD-SAFE BACKGROUND WORKERS
 # =========================================================
-async def send_cloud_email(to_email: str, subject: str, html_content: str, school_name: str):
+def send_cloud_email_sync(to_email: str, subject: str, html_content: str, school_name: str):
     try:
         msg = MIMEMultipart()
         msg['From'] = f"{school_name} <{SMTP_USER}>"
@@ -69,6 +66,15 @@ async def send_cloud_email(to_email: str, subject: str, html_content: str, schoo
         server.quit()
     except Exception as e:
         print(f"Cloud Email Error: {e}")
+
+def send_cloud_sms_sync(phone: str, msg: str):
+    try:
+        sms_payload = { "sender": ARKESEL_SENDER_ID, "message": msg, "recipients": [phone] }
+        # Using synchronous HTTPX client so it plays nicely with FastAPI Thread Pools
+        with httpx.Client() as client:
+            client.post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=10.0)
+    except Exception as e:
+        print(f"Cloud SMS Error: {e}")
 
 # =========================================================
 # 🟢 PYDANTIC DATA MODELS
@@ -130,10 +136,10 @@ class TeacherSubmitPayload(BaseModel):
 
 
 # =========================================================
-# 🟢 PUBLIC ADMISSIONS (NOW WITH INSTANT NOTIFICATIONS)
+# 🟢 PUBLIC ADMISSIONS (PRO BACKGROUND DISPATCH)
 # =========================================================
 @app.post("/api/v1/public/admissions/submit")
-async def submit_admission(payload: AdmissionPayload):
+async def submit_admission(payload: AdmissionPayload, background_tasks: BackgroundTasks):
     conn = get_db()
     cursor = conn.cursor()
     app_id = f"APP-{str(uuid.uuid4())[:8].upper()}"
@@ -143,21 +149,20 @@ async def submit_admission(payload: AdmissionPayload):
             (app_id, payload.schoolId, payload.branchId, payload.applicantName, payload.appliedClassId, payload.parentPhone, payload.parentEmail, payload.address, payload.previousSchool, ts))
         conn.commit()
 
-        # 🟢 PRO FIX: INSTANT CLOUD COMMUNICATIONS (No Desktop Required!)
+        # Generate Safe Variables
         school_name = payload.schoolId.replace("-", " ")
         first_name = payload.applicantName.split(' ')[0]
         admin_portal_link = f"https://admissionpixeledu.netlify.app/?school={payload.schoolId}"
 
-        # 1. Fire Instant SMS via Arkesel
         digits_only = "".join(filter(str.isdigit, payload.parentPhone))
         clean_phone = "233" + digits_only[1:] if digits_only.startswith("0") and len(digits_only) == 10 else digits_only
         
+        # 1. Dispatch SMS to Background Thread
         if len(clean_phone) >= 9:
             sms_msg = f"Dear Parent, your application for {first_name} has been received by {school_name}. Ref: {app_id}. Track status here: {admin_portal_link}"
-            sms_payload = { "sender": ARKESEL_SENDER_ID, "message": sms_msg, "recipients": [clean_phone] }
-            asyncio.create_task(httpx.AsyncClient().post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=5.0))
+            background_tasks.add_task(send_cloud_sms_sync, clean_phone, sms_msg)
 
-        # 2. Fire Instant Email via Google SMTP
+        # 2. Dispatch Email to Background Thread
         if payload.parentEmail and "@" in payload.parentEmail:
             email_html = f"""
             <div style='font-family: "Segoe UI", Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05);'>
@@ -179,7 +184,7 @@ async def submit_admission(payload: AdmissionPayload):
                 </div>
             </div>
             """
-            asyncio.create_task(send_cloud_email(payload.parentEmail, f"Application Received - {payload.applicantName}", email_html, school_name))
+            background_tasks.add_task(send_cloud_email_sync, payload.parentEmail, f"Application Received - {payload.applicantName}", email_html, school_name)
 
         return {"success": True, "applicationId": app_id}
     except Exception as e:
@@ -203,7 +208,7 @@ async def get_school_snapshot(school_id: str):
     return {"success": False, "error": "School data offline."}
 
 @app.post("/api/v1/public/parents/request-otp")
-async def request_parent_otp(payload: OTPRequestPayload):
+async def request_parent_otp(payload: OTPRequestPayload, background_tasks: BackgroundTasks):
     digits_only = "".join(filter(str.isdigit, payload.phone))
     clean_phone = "233" + digits_only[1:] if digits_only.startswith("0") and len(digits_only) == 10 else digits_only
     search_name = payload.studentName.strip().lower()
@@ -266,15 +271,10 @@ async def request_parent_otp(payload: OTPRequestPayload):
     finally:
         conn.close()
 
-    sms_payload = { "sender": ARKESEL_SENDER_ID, "message": f"PixelEdu Security: {otp_code} is your Parent Portal OTP. Valid for 10 mins.", "recipients": [clean_phone] }
+    sms_msg = f"PixelEdu Security: {otp_code} is your Parent Portal OTP. Valid for 10 mins."
+    background_tasks.add_task(send_cloud_sms_sync, clean_phone, sms_msg)
     
-    try:
-        async with httpx.AsyncClient() as http_client:
-            response = await http_client.post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=10.0)
-            if response.status_code in [200, 201]: return {"success": True, "message": "OTP Dispatched."}
-            else: raise HTTPException(status_code=500, detail=f"Arkesel Error: {response.text}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"success": True, "message": "OTP Dispatched."}
 
 @app.post("/api/v1/public/parents/verify-otp")
 async def verify_parent_otp(payload: OTPVerifyPayload):
@@ -438,7 +438,7 @@ async def push_student_snapshot(payload: SyncSnapshotPayload):
 # 🟢 ENTERPRISE LICENSE EXCHANGE ENGINE
 # =========================================================
 @app.post("/api/sync/submit-renewal")
-async def submit_renewal(payload: RenewalPayload):
+async def submit_renewal(payload: RenewalPayload, background_tasks: BackgroundTasks):
     conn = get_db()
     cursor = conn.cursor()
     ts = datetime.datetime.utcnow().isoformat()
@@ -448,8 +448,7 @@ async def submit_renewal(payload: RenewalPayload):
         conn.commit()
         
         vendor_msg = f"[PIXELEDU ALERT] {payload.schoolName} ({payload.branchId}) requested a {payload.requestedDays}-day renewal. Amount: GHS {payload.amountPaid} via {payload.paymentMethod}. Log into Admin Authority to process."
-        sms_payload = { "sender": ARKESEL_SENDER_ID, "message": vendor_msg, "recipients": ["0554794797"] }
-        asyncio.create_task(httpx.AsyncClient().post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=5.0))
+        background_tasks.add_task(send_cloud_sms_sync, "0554794797", vendor_msg)
 
         return {"success": True}
     except Exception as e:
