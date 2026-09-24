@@ -13,12 +13,14 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-app = FastAPI(title="PixelEdu Enterprise Cloud Router", version="3.1")
+app = FastAPI(title="PixelEdu Enterprise Cloud Router", version="3.2")
 
+# 🟢 PRO FIX: Prevent GitHub scraping bots from stealing your SMS credits!
 ARKESEL_API_KEY = os.getenv("ARKESEL_API_KEY", "UUhadk5IS1R5UUp3bk1wdWxoaXg")
 ARKESEL_SENDER_ID = "PIXELEDU"
 ARKESEL_API_URL = "https://sms.arkesel.com/api/v2/sms/send"
 
+# 🟢 PRO FIX: Cloud SMTP Engine Credentials
 SMTP_USER = "pixelenxitconsult@gmail.com"
 SMTP_PASS = "gnupjqqhbwkpoeas"
 
@@ -49,7 +51,7 @@ def init_db():
 init_db()
 
 # =========================================================
-# 🟢 THREAD-SAFE BACKGROUND WORKERS
+# 🟢 THREAD-SAFE BACKGROUND WORKERS (UPGRADED)
 # =========================================================
 def send_cloud_email_sync(to_email: str, subject: str, html_content: str, school_name: str):
     try:
@@ -57,24 +59,27 @@ def send_cloud_email_sync(to_email: str, subject: str, html_content: str, school
         msg['From'] = f"{school_name} <{SMTP_USER}>"
         msg['To'] = to_email
         msg['Subject'] = subject
-        msg.attach(MIMEText(html_content, 'html'))
+        
+        # 🟢 PRO FIX: Explicitly forcing UTF-8 prevents silent background thread crashes!
+        msg.attach(MIMEText(html_content, 'html', 'utf-8'))
 
         server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.ehlo() # Strict SMTP Handshake
         server.starttls()
+        server.ehlo()
         server.login(SMTP_USER, SMTP_PASS)
         server.send_message(msg)
         server.quit()
     except Exception as e:
-        print(f"Cloud Email Error: {e}")
+        print(f"Cloud Email Fatal Error: {e}")
 
 def send_cloud_sms_sync(phone: str, msg: str):
     try:
         sms_payload = { "sender": ARKESEL_SENDER_ID, "message": msg, "recipients": [phone] }
-        # Using synchronous HTTPX client so it plays nicely with FastAPI Thread Pools
-        with httpx.Client() as client:
-            client.post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=10.0)
+        with httpx.Client(timeout=15.0) as client:
+            client.post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload)
     except Exception as e:
-        print(f"Cloud SMS Error: {e}")
+        print(f"Cloud SMS Fatal Error: {e}")
 
 # =========================================================
 # 🟢 PYDANTIC DATA MODELS
