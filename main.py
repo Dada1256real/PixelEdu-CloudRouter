@@ -9,14 +9,21 @@ import json
 import httpx
 import random
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import asyncio
 
 app = FastAPI(title="PixelEdu Enterprise Cloud Router", version="3.0")
 
 # 🟢 PRO FIX: Prevent GitHub scraping bots from stealing your SMS credits!
-# Set this in your Render.com Environment Variables dashboard.
 ARKESEL_API_KEY = os.getenv("ARKESEL_API_KEY", "UUhadk5IS1R5UUp3bk1wdWxoaXg")
 ARKESEL_SENDER_ID = "PIXELEDU"
 ARKESEL_API_URL = "https://sms.arkesel.com/api/v2/sms/send"
+
+# 🟢 PRO FIX: Cloud SMTP Engine Credentials
+SMTP_USER = "pixelenxitconsult@gmail.com"
+SMTP_PASS = "gnupjqqhbwkpoeas"
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,8 +34,6 @@ app.add_middleware(
 )
 
 def get_db():
-    # Note: If deploying on Render, ensure this path points to a Persistent Disk volume
-    # otherwise your database will wipe on every deployment/restart.
     conn = sqlite3.connect("pixeledu_cloud_staging.db")
     conn.row_factory = sqlite3.Row
     return conn
@@ -45,6 +50,25 @@ def init_db():
     conn.close()
 
 init_db()
+
+# =========================================================
+# 🟢 CLOUD EMAIL HELPER
+# =========================================================
+async def send_cloud_email(to_email: str, subject: str, html_content: str, school_name: str):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = f"{school_name} <{SMTP_USER}>"
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(html_content, 'html'))
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
+        server.quit()
+    except Exception as e:
+        print(f"Cloud Email Error: {e}")
 
 # =========================================================
 # 🟢 PYDANTIC DATA MODELS
@@ -93,7 +117,6 @@ class AdminApproveKeyPayload(BaseModel):
     installationId: str
     generatedKey: str
 
-# 🟢 NEW: Teacher Portal Data Models
 class TeacherAuthPayload(BaseModel):
     schoolId: str
     staffId: str
@@ -107,7 +130,7 @@ class TeacherSubmitPayload(BaseModel):
 
 
 # =========================================================
-# 🟢 PUBLIC ADMISSIONS
+# 🟢 PUBLIC ADMISSIONS (NOW WITH INSTANT NOTIFICATIONS)
 # =========================================================
 @app.post("/api/v1/public/admissions/submit")
 async def submit_admission(payload: AdmissionPayload):
@@ -119,6 +142,45 @@ async def submit_admission(payload: AdmissionPayload):
         cursor.execute("INSERT INTO Cloud_Admissions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_DOWNLOAD', ?)", 
             (app_id, payload.schoolId, payload.branchId, payload.applicantName, payload.appliedClassId, payload.parentPhone, payload.parentEmail, payload.address, payload.previousSchool, ts))
         conn.commit()
+
+        # 🟢 PRO FIX: INSTANT CLOUD COMMUNICATIONS (No Desktop Required!)
+        school_name = payload.schoolId.replace("-", " ")
+        first_name = payload.applicantName.split(' ')[0]
+        admin_portal_link = f"https://admissionpixeledu.netlify.app/?school={payload.schoolId}"
+
+        # 1. Fire Instant SMS via Arkesel
+        digits_only = "".join(filter(str.isdigit, payload.parentPhone))
+        clean_phone = "233" + digits_only[1:] if digits_only.startswith("0") and len(digits_only) == 10 else digits_only
+        
+        if len(clean_phone) >= 9:
+            sms_msg = f"Dear Parent, your application for {first_name} has been received by {school_name}. Ref: {app_id}. Track status here: {admin_portal_link}"
+            sms_payload = { "sender": ARKESEL_SENDER_ID, "message": sms_msg, "recipients": [clean_phone] }
+            asyncio.create_task(httpx.AsyncClient().post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=5.0))
+
+        # 2. Fire Instant Email via Google SMTP
+        if payload.parentEmail and "@" in payload.parentEmail:
+            email_html = f"""
+            <div style='font-family: "Segoe UI", Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05);'>
+                <div style='background-color: #0f172a; padding: 25px; text-align: center; border-bottom: 4px solid #4f46e5;'>
+                    <h2 style='color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 2px; text-transform: uppercase;'>{school_name}</h2>
+                </div>
+                <div style='padding: 35px; color: #334155; line-height: 1.7; font-size: 15px;'>
+                    <h3 style='color: #4f46e5; margin-top: 0; border-bottom: 2px solid #f1f5f9; padding-bottom: 12px; font-size: 18px; text-align: center;'>ADMISSION RECEIVED</h3>
+                    <p>Dear Parent/Guardian,</p>
+                    <p>We have successfully received the admission application for <strong>{payload.applicantName}</strong>.</p>
+                    <div style='background-color: #f8fafc; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #e2e8f0;'>
+                        <p style='margin: 0 0 10px 0;'><strong>Reference ID:</strong> {app_id}</p>
+                        <p style='margin: 0;'><strong>Status:</strong> <span style='color: #d97706; font-weight: bold;'>Pending Review</span></p>
+                    </div>
+                    <p>Our admissions committee will review the profile and communicate the next steps.</p>
+                    <div style='text-align: center; margin: 30px 0;'>
+                        <a href='{admin_portal_link}' style='background-color: #4f46e5; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 14px; display: inline-block;'>Track Application Status</a>
+                    </div>
+                </div>
+            </div>
+            """
+            asyncio.create_task(send_cloud_email(payload.parentEmail, f"Application Received - {payload.applicantName}", email_html, school_name))
+
         return {"success": True, "applicationId": app_id}
     except Exception as e:
         conn.rollback()
@@ -261,7 +323,7 @@ async def submit_parent_request(payload: ParentRequestPayload):
 
 
 # =========================================================
-# 🟢 NEW: TEACHER PORTAL & WORKSPACE API
+# 🟢 TEACHER PORTAL & WORKSPACE API
 # =========================================================
 
 @app.post("/api/v1/teacher/auth")
@@ -310,7 +372,6 @@ async def get_teacher_data(school_id: str):
     if not row: return {"success": False, "error": "No data found."}
 
     snapshot = json.loads(row["Encrypted_JSON_Payload"])
-    # We only return what the teacher needs to keep the mobile payload extremely fast
     return {
         "success": True,
         "data": {
@@ -324,7 +385,6 @@ async def get_teacher_data(school_id: str):
 async def teacher_submit(payload: TeacherSubmitPayload):
     conn = get_db()
     cursor = conn.cursor()
-    # We inject this into Cloud_Parent_Requests so the Desktop CloudSyncDaemon automatically downloads it into the Pending Approvals Queue!
     req_id = f"TCH-{str(uuid.uuid4())[:8].upper()}"
     ts = datetime.datetime.utcnow().isoformat()
     try:
@@ -377,7 +437,6 @@ async def push_student_snapshot(payload: SyncSnapshotPayload):
 # =========================================================
 # 🟢 ENTERPRISE LICENSE EXCHANGE ENGINE
 # =========================================================
-
 @app.post("/api/sync/submit-renewal")
 async def submit_renewal(payload: RenewalPayload):
     conn = get_db()
@@ -390,8 +449,7 @@ async def submit_renewal(payload: RenewalPayload):
         
         vendor_msg = f"[PIXELEDU ALERT] {payload.schoolName} ({payload.branchId}) requested a {payload.requestedDays}-day renewal. Amount: GHS {payload.amountPaid} via {payload.paymentMethod}. Log into Admin Authority to process."
         sms_payload = { "sender": ARKESEL_SENDER_ID, "message": vendor_msg, "recipients": ["0554794797"] }
-        async with httpx.AsyncClient() as http_client:
-            await http_client.post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=5.0)
+        asyncio.create_task(httpx.AsyncClient().post(ARKESEL_API_URL, headers={"api-key": ARKESEL_API_KEY, "Content-Type": "application/json"}, json=sms_payload, timeout=5.0))
 
         return {"success": True}
     except Exception as e:
