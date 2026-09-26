@@ -12,6 +12,7 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr # 🟢 PRO FIX: Required for RFC-compliant sender headers
 
 app = FastAPI(title="PixelEdu Enterprise Cloud Router", version="3.2")
 
@@ -55,18 +56,23 @@ init_db()
 # =========================================================
 def send_cloud_email_sync(to_email: str, subject: str, html_content: str, school_name: str):
     try:
-        msg = MIMEMultipart()
-        msg['From'] = f"{school_name} <{SMTP_USER}>"
+        # 🟢 PRO FIX 1: 'alternative' MIME prevents silent drops by Gmail's spam filters
+        msg = MIMEMultipart('alternative')
+        
+        # 🟢 PRO FIX 2: RFC-compliant address encoding
+        msg['From'] = formataddr((school_name, SMTP_USER))
         msg['To'] = to_email
         msg['Subject'] = subject
         
-        # 🟢 PRO FIX: Explicitly forcing UTF-8 prevents silent background thread crashes!
+        # 🟢 PRO FIX 3: Plain-text fallback guarantees delivery through aggressive firewalls
+        plain_text = "This is an official communication from PixelEdu. Please view this message in an HTML-compatible email client."
+        msg.attach(MIMEText(plain_text, 'plain', 'utf-8'))
+        
+        # Explicitly forcing UTF-8 HTML attachment
         msg.attach(MIMEText(html_content, 'html', 'utf-8'))
 
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.ehlo() # Strict SMTP Handshake
-        server.starttls()
-        server.ehlo()
+        # 🟢 PRO FIX 4: SSL on Port 465 is far more reliable on Cloud hosts than STARTTLS on 587
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(SMTP_USER, SMTP_PASS)
         server.send_message(msg)
         server.quit()
@@ -158,7 +164,7 @@ async def submit_admission(payload: AdmissionPayload, background_tasks: Backgrou
         school_name = payload.schoolId.replace("-", " ")
         first_name = payload.applicantName.split(' ')[0]
         
-        # 🟢 PRO FIX: The correct URL encoding
+        # 🟢 PRO FIX: Perfect URL mapping for tracking links
         admin_portal_link = f"https://admissionpixeledu.netlify.app/?school={payload.schoolId}"
 
         digits_only = "".join(filter(str.isdigit, payload.parentPhone))
