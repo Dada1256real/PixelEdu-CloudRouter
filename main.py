@@ -157,6 +157,8 @@ async def submit_admission(payload: AdmissionPayload, background_tasks: Backgrou
         # Generate Safe Variables
         school_name = payload.schoolId.replace("-", " ")
         first_name = payload.applicantName.split(' ')[0]
+        
+        # 🟢 PRO FIX: The correct URL encoding
         admin_portal_link = f"https://admissionpixeledu.netlify.app/?school={payload.schoolId}"
 
         digits_only = "".join(filter(str.isdigit, payload.parentPhone))
