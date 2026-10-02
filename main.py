@@ -172,7 +172,7 @@ async def submit_admission(payload: AdmissionPayload, background_tasks: Backgrou
         
         # 1. Dispatch SMS to Background Thread
         if len(clean_phone) >= 9:
-            sms_msg = f"Dear Parent, your application for {first_name} has been received by {school_name}. Ref: {app_id}. Track status here: {admin_portal_link}"
+            sms_msg = f"Dear Parent, your application for {first_name} has been received by {school_name}. Ref: {app_id}. Kindly share our self-register link to family and friends: {admin_portal_link}"
             background_tasks.add_task(send_cloud_sms_sync, clean_phone, sms_msg)
 
         # 2. Dispatch Email to Background Thread
